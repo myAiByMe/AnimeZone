@@ -21,34 +21,56 @@ from app import (
 logger = logging.getLogger(__name__)
 
 # ==================
-# SYSTÈME VIDÉO (inchangé mais optimisé)
+# SYSTÈME VIDÉO HYBRIDE
 # ==================
 
 def parse_video_url(url):
-    """Parse URL vidéo"""
+    """Parse URL vidéo - Support multi-domaines"""
     if not url:
         return None, None
     
     url_clean = url.strip().lower()
     
-    # SENDVID
+    # SENDVID (sendvid.com, sendvid.co, sendvid.net, etc.)
     if 'sendvid' in url_clean:
-        match = re.search(r'sendvid\.com/embed/([a-zA-Z0-9]+)', url, re.IGNORECASE)
+        # Patterns: sendvid.xxx/embed/ID ou sendvid.xxx/ID
+        match = re.search(r'sendvid\.[a-z]+/embed/([a-zA-Z0-9]+)', url, re.IGNORECASE)
         if match:
             return ('sendvid', match.group(1))
         
-        match = re.search(r'sendvid\.com/([a-zA-Z0-9]+)', url, re.IGNORECASE)
+        match = re.search(r'sendvid\.[a-z]+/([a-zA-Z0-9]+)', url, re.IGNORECASE)
         if match:
             return ('sendvid', match.group(1))
     
-    # VIDMOLY
+    # VIDMOLY (vidmoly.com, vidmoly.ru, vidmoly.me, etc.)
     if 'vidmoly' in url_clean:
-        match = re.search(r'embed-([a-zA-Z0-9]+)\.html', url, re.IGNORECASE)
+        # Pattern: vidmoly.xxx/embed-ID.html ou vidmoly.xxx/ID
+        match = re.search(r'vidmoly\.[a-z]+/embed-([a-zA-Z0-9]+)\.html', url, re.IGNORECASE)
+        if match:
+            return ('vidmoly', match.group(1))
+        
+        match = re.search(r'vidmoly\.[a-z]+/([a-zA-Z0-9]+)', url, re.IGNORECASE)
         if match:
             return ('vidmoly', match.group(1))
     
-    return None, None
+    # SIBNET (sibnet.ru, video.sibnet.ru, etc.)
+    if 'sibnet' in url_clean:
+        # Pattern: sibnet.xxx/video/ID ou video.sibnet.xxx/shell.php?videoid=ID
+        match = re.search(r'sibnet\.[a-z]+/video/(\d+)', url, re.IGNORECASE)
+        if match:
+            return ('sibnet', match.group(1))
+        
+        match = re.search(r'videoid=(\d+)', url, re.IGNORECASE)
+        if match:
+            return ('sibnet', match.group(1))
+    
+    # GENERIC (autres lecteurs)
+    return ('generic', url)
 
+
+# ==================
+# EXTRACTEURS SPÉCIFIQUES
+# ==================
 
 def extract_vidmoly_m3u8(embed_url):
     """Extrait M3U8 Vidmoly"""
@@ -67,7 +89,7 @@ def extract_vidmoly_m3u8(embed_url):
         
         return match.group(1) if match else None
     except Exception as e:
-        logger.error(f"Erreur Vidmoly M3U8: {e}")
+        logger.error(f"❌ Erreur Vidmoly M3U8: {e}")
         return None
 
 
@@ -93,8 +115,31 @@ def extract_sendvid_video(embed_url):
         
         return None
     except Exception as e:
-        logger.error(f"Erreur SendVid: {e}")
+        logger.error(f"❌ Erreur SendVid: {e}")
         return None
+
+
+def extract_sibnet_video(video_id):
+    """Extrait vidéo Sibnet"""
+    try:
+        embed_url = f"https://video.sibnet.ru/shell.php?videoid={video_id}"
+        response = video_session.get(embed_url, timeout=10)
+        html = response.text
+        
+        # Chercher M3U8
+        m3u8_match = re.search(r'["\']([^"\']+\.m3u8[^"\']*)["\']', html, re.IGNORECASE)
+        if m3u8_match:
+            return ('m3u8', m3u8_match.group(1))
+        
+        # Chercher MP4
+        mp4_match = re.search(r'["\']([^"\']+\.mp4[^"\']*)["\']', html, re.IGNORECASE)
+        if mp4_match:
+            return ('mp4', mp4_match.group(1))
+        
+        return None, None
+    except Exception as e:
+        logger.error(f"❌ Erreur Sibnet: {e}")
+        return None, None
 
 
 def get_hls_segments(master_url):
@@ -115,7 +160,80 @@ def get_hls_segments(master_url):
         
         return None, None
     except Exception as e:
-        logger.error(f"Erreur HLS: {e}")
+        logger.error(f"❌ Erreur HLS: {e}")
+        return None, None
+
+
+# ==================
+# EXTRACTEUR GÉNÉRIQUE (Fallback)
+# ==================
+
+def try_extract_all_methods(embed_url):
+    """Teste TOUTES les méthodes pour extraire une vidéo"""
+    try:
+        response = video_session.get(embed_url, timeout=10)
+        html = response.text
+        base_url = embed_url.rsplit('/', 1)[0] + '/'
+        
+        # 1️⃣ Chercher M3U8
+        m3u8_patterns = [
+            r'sources\s*:\s*\[\s*{\s*file\s*:\s*["\']([^"\']+\.m3u8[^"\']*)["\']',
+            r'file\s*:\s*["\']([^"\']+\.m3u8[^"\']*)["\']',
+            r'<source[^>]*src=["\']([^"\']+\.m3u8[^"\']*)["\']',
+            r'src=["\']([^"\']+\.m3u8[^"\']*)["\']',
+            r'url\s*:\s*["\']([^"\']+\.m3u8[^"\']*)["\']',
+            r'hls\s*:\s*["\']([^"\']+\.m3u8[^"\']*)["\']',
+        ]
+        
+        for pattern in m3u8_patterns:
+            match = re.search(pattern, html, re.IGNORECASE)
+            if match:
+                m3u8_url = match.group(1)
+                if not m3u8_url.startswith('http'):
+                    m3u8_url = urljoin(base_url, m3u8_url)
+                logger.info(f"✅ M3U8 trouvé (générique): {m3u8_url[:60]}...")
+                return ('hls', m3u8_url)
+        
+        # 2️⃣ Chercher MP4
+        mp4_patterns = [
+            r'<source[^>]*src=["\']([^"\']+\.mp4[^"\']*)["\']',
+            r'src=["\']([^"\']+\.mp4[^"\']*)["\']',
+            r'file\s*:\s*["\']([^"\']+\.mp4[^"\']*)["\']',
+            r'url\s*:\s*["\']([^"\']+\.mp4[^"\']*)["\']',
+            r'video["\']?\s*:\s*["\']([^"\']+\.mp4[^"\']*)["\']',
+            r'src\s*=\s*["\']([^"\']+\.mp4[^"\']*)["\']',
+        ]
+        
+        for pattern in mp4_patterns:
+            match = re.search(pattern, html, re.IGNORECASE)
+            if match:
+                mp4_url = match.group(1)
+                if not mp4_url.startswith('http'):
+                    mp4_url = urljoin(base_url, mp4_url)
+                logger.info(f"✅ MP4 trouvé (générique): {mp4_url[:60]}...")
+                return ('mp4', mp4_url)
+        
+        # 3️⃣ Chercher WEBM
+        webm_patterns = [
+            r'<source[^>]*src=["\']([^"\']+\.webm[^"\']*)["\']',
+            r'src=["\']([^"\']+\.webm[^"\']*)["\']',
+            r'file\s*:\s*["\']([^"\']+\.webm[^"\']*)["\']',
+        ]
+        
+        for pattern in webm_patterns:
+            match = re.search(pattern, html, re.IGNORECASE)
+            if match:
+                webm_url = match.group(1)
+                if not webm_url.startswith('http'):
+                    webm_url = urljoin(base_url, webm_url)
+                logger.info(f"✅ WEBM trouvé (générique): {webm_url[:60]}...")
+                return ('webm', webm_url)
+        
+        logger.warning(f"⚠️ Aucune vidéo trouvée dans: {embed_url}")
+        return None, None
+        
+    except Exception as e:
+        logger.error(f"❌ Erreur extraction générique: {e}")
         return None, None
 
 
@@ -132,17 +250,15 @@ def register_frontend_routes(app):
         if not current_user.is_authenticated:
             return redirect(url_for('login'))
         
-        # 🔥 Utilise le cache
         anime_data = load_anime_data()
         
-        # Continue watching (query optimisée)
         continue_watching = []
         latest_progress = get_user_progress_optimized(current_user.id, limit=20)
         
         processed = set()
         for progress in latest_progress:
             if progress.anime_id not in processed:
-                anime = get_anime_by_id(progress.anime_id)  # 🔥 O(1)
+                anime = get_anime_by_id(progress.anime_id)
                 if anime:
                     season = next((s for s in anime.get('seasons', []) 
                                  if s.get('season_number') == progress.season_number), None)
@@ -158,15 +274,13 @@ def register_frontend_routes(app):
                             })
                             processed.add(progress.anime_id)
         
-        # Favoris (query optimisée)
         favorite_anime = []
         favorites = get_user_favorites_optimized(current_user.id, limit=15)
         for fav in favorites:
-            anime = get_anime_by_id(fav.anime_id)  # 🔥 O(1)
+            anime = get_anime_by_id(fav.anime_id)
             if anime:
                 favorite_anime.append(anime)
         
-        # Featured (depuis cache)
         featured = load_discover_data()
         featured = [a for a in featured if a.get('has_episodes', False)][:12]
         
@@ -178,7 +292,7 @@ def register_frontend_routes(app):
     
     @app.route('/login', methods=['GET', 'POST'])
     def login():
-        """Login OPTIMISÉ"""
+        """Login"""
         if current_user.is_authenticated:
             return redirect(url_for('index'))
         
@@ -186,7 +300,6 @@ def register_frontend_routes(app):
             username = request.form.get('username')
             password = request.form.get('password')
             
-            # 🔥 Query avec index
             user = User.query.filter_by(username=username).first()
             
             if user and user.check_password(password):
@@ -245,7 +358,6 @@ def register_frontend_routes(app):
         query = request.args.get('query', '').lower()
         genre = request.args.get('genre', '').lower()
         
-        # 🔥 Depuis cache
         anime_data = load_anime_data()
         
         filtered = []
@@ -271,14 +383,12 @@ def register_frontend_routes(app):
     @app.route('/anime/<int:anime_id>')
     @login_required
     def anime_detail(anime_id):
-        """Détails anime OPTIMISÉ"""
-        # 🔥 Recherche O(1)
+        """Détails anime"""
         anime = get_anime_by_id(anime_id)
         
         if not anime:
             return render_template('404.html', message="Anime non trouvé"), 404
         
-        # Trier saisons
         if anime.get('seasons'):
             regular, kai, films = [], [], []
             for season in anime['seasons']:
@@ -294,13 +404,11 @@ def register_frontend_routes(app):
             kai.sort(key=lambda s: s.get('season_number', 0))
             anime['seasons'] = regular + films + kai
         
-        # Infos utilisateur (queries optimisées)
         is_favorite = UserFavorite.query.filter_by(
             user_id=current_user.id,
             anime_id=anime_id
         ).first() is not None
         
-        # 🔥 1 seule query pour TOUTE la progression
         episode_progress = {}
         for progress in UserProgress.query.filter_by(user_id=current_user.id, anime_id=anime_id).all():
             key = f"{progress.season_number}_{progress.episode_number}"
@@ -326,8 +434,7 @@ def register_frontend_routes(app):
     @app.route('/player/<int:anime_id>/<int:season_num>/<int:episode_num>')
     @login_required
     def player(anime_id, season_num, episode_num):
-        """Lecteur OPTIMISÉ"""
-        # 🔥 O(1)
+        """Lecteur"""
         anime = get_anime_by_id(anime_id)
         
         if not anime:
@@ -343,7 +450,6 @@ def register_frontend_routes(app):
         if not episode:
             return render_template('404.html', message="Épisode non trouvé"), 404
         
-        # Sélection URL
         def select_best_url(urls_dict):
             if not urls_dict:
                 return None, None
@@ -356,8 +462,9 @@ def register_frontend_routes(app):
                 
                 vidmoly = [u for u in url_list if 'vidmoly' in u.lower()]
                 sendvid = [u for u in url_list if 'sendvid' in u.lower()]
+                sibnet = [u for u in url_list if 'sibnet' in u.lower()]
                 
-                return (vidmoly or sendvid or url_list)[0] if (vidmoly or sendvid or url_list) else None
+                return (vidmoly or sendvid or sibnet or url_list)[0] if (vidmoly or sendvid or sibnet or url_list) else None
             
             for lang in ['VF', 'VOSTFR']:
                 if lang in urls_dict:
@@ -382,7 +489,6 @@ def register_frontend_routes(app):
             video_id = video_url.split("/")[-1].split(".")[0]
             download_url = f"https://sendvid.com/embed/{video_id}"
         
-        # Progression (1 query)
         time_position = 0
         progress = UserProgress.query.filter_by(
             user_id=current_user.id,
@@ -412,13 +518,12 @@ def register_frontend_routes(app):
     @app.route('/profile')
     @login_required
     def profile():
-        """Profil OPTIMISÉ"""
+        """Profil"""
         anime_data = load_anime_data()
         
-        # 🔥 Query limitée
         watching_anime = []
         for progress in get_user_progress_optimized(current_user.id, limit=50):
-            anime = get_anime_by_id(progress.anime_id)  # O(1)
+            anime = get_anime_by_id(progress.anime_id)
             if anime:
                 season = next((s for s in anime.get('seasons', []) 
                              if s.get('season_number') == progress.season_number), None)
@@ -432,10 +537,9 @@ def register_frontend_routes(app):
                     'episode': episode
                 })
         
-        # Favoris optimisés
         favorite_anime = []
         for fav in get_user_favorites_optimized(current_user.id, limit=50):
-            anime = get_anime_by_id(fav.anime_id)  # O(1)
+            anime = get_anime_by_id(fav.anime_id)
             if anime:
                 favorite_anime.append(anime)
         
@@ -478,7 +582,7 @@ def register_frontend_routes(app):
     @app.route('/categories')
     @login_required
     def categories():
-        """Catégories (depuis cache)"""
+        """Catégories"""
         anime_data = load_anime_data()
         genres = get_all_genres()
         
@@ -495,13 +599,13 @@ def register_frontend_routes(app):
     
     
     # ==================
-    # API VIDÉO (inchangé)
+    # API VIDÉO HYBRIDE
     # ==================
     
     @app.route('/api/video/info', methods=['POST'])
     @login_required
     def video_info():
-        """Info vidéo"""
+        """Info vidéo - Gère Vidmoly/SendVid/Sibnet + Fallback générique"""
         try:
             data = request.get_json()
             url = data.get('url', '').strip()
@@ -510,59 +614,32 @@ def register_frontend_routes(app):
                 return jsonify({'success': False, 'error': 'URL manquante'}), 400
             
             player_type, video_id = parse_video_url(url)
-            
-            if not player_type:
-                return jsonify({'success': False, 'error': 'Type non supporté', 'use_iframe': True}), 400
-            
             video_key = f"{player_type}_{video_id}"
             
-            # VIDMOLY
-            if player_type == 'vidmoly':
-                embed_url = f"https://vidmoly.net/embed-{video_id}.html"
-                m3u8_url = extract_vidmoly_m3u8(embed_url)
-                
-                if not m3u8_url:
-                    return jsonify({'success': False, 'error': 'M3U8 non trouvé'}), 404
-                
-                playlist_url, playlist = get_hls_segments(m3u8_url)
-                
-                if not playlist or not playlist.segments:
-                    return jsonify({'success': False, 'error': 'Segments non trouvés'}), 500
-                
-                app.config[f'video_{video_key}'] = {
-                    'player_type': 'vidmoly',
-                    'url': playlist_url,
-                    'playlist': playlist
-                }
-                
-                return jsonify({
-                    'success': True,
-                    'player_type': 'vidmoly',
-                    'video_key': video_key,
-                    'segments': len(playlist.segments)
-                })
+            logger.info(f"🎬 Traitement vidéo: {player_type} - {video_id}")
             
-            # SENDVID
-            elif player_type == 'sendvid':
+            # ========== SENDVID ==========
+            if player_type == 'sendvid':
                 embed_url = f"https://sendvid.com/embed/{video_id}"
+                logger.info(f"📍 SendVid embed_url: {embed_url}")
+                
                 video_url = extract_sendvid_video(embed_url)
+                logger.info(f"📍 SendVid video_url: {video_url}")
                 
                 if not video_url:
-                    return jsonify({'success': False, 'error': 'Vidéo non trouvée'}), 404
+                    logger.warning(f"⚠️ SendVid MP4 non trouvé, fallback générique")
+                    video_type, video_url = try_extract_all_methods(embed_url)
+                    if not video_url:
+                        return jsonify({'success': False, 'error': 'Vidéo non trouvée'}), 404
+                    logger.info(f"✅ Fallback trouvé: {video_type} - {video_url[:60]}...")
+                else:
+                    video_type = 'mp4'
                 
-                try:
-                    head_response = video_session.head(video_url, timeout=10, allow_redirects=True)
-                    accepts_range = 'bytes' in head_response.headers.get('Accept-Ranges', '').lower()
-                    total_size = int(head_response.headers.get('Content-Length', 0))
-                except:
-                    accepts_range = False
-                    total_size = 0
-                
+                # SENDVID ORIGINAL - garder le même format que ancien script
                 app.config[f'video_{video_key}'] = {
                     'player_type': 'sendvid',
-                    'url': head_response.url if 'head_response' in locals() else video_url,
-                    'accepts_range': accepts_range,
-                    'total_size': total_size
+                    'url': video_url,
+                    'video_type': video_type
                 }
                 
                 return jsonify({
@@ -572,8 +649,149 @@ def register_frontend_routes(app):
                     'direct_mp4': True
                 })
             
+            # ========== VIDMOLY ==========
+            elif player_type == 'vidmoly':
+                embed_url = f"https://vidmoly.net/embed-{video_id}.html"
+                logger.info(f"📍 Vidmoly embed_url: {embed_url}")
+                
+                m3u8_url = extract_vidmoly_m3u8(embed_url)
+                logger.info(f"📍 Vidmoly m3u8_url: {m3u8_url}")
+                
+                if not m3u8_url:
+                    logger.warning(f"⚠️ Vidmoly M3U8 non trouvé, fallback générique")
+                    video_type, video_url = try_extract_all_methods(embed_url)
+                    if not video_url:
+                        return jsonify({'success': False, 'error': 'Vidéo non trouvée'}), 404
+                    logger.info(f"✅ Fallback trouvé: {video_type} - {video_url[:60]}...")
+                else:
+                    video_type = 'hls'
+                    video_url = m3u8_url
+                
+                # Si HLS, récupérer les segments
+                if video_type == 'hls':
+                    playlist_url, playlist = get_hls_segments(video_url)
+                    if not playlist or not playlist.segments:
+                        return jsonify({'success': False, 'error': 'Segments HLS non trouvés'}), 500
+                    
+                    app.config[f'video_{video_key}'] = {
+                        'player_type': 'hls',
+                        'url': playlist_url,
+                        'playlist': playlist
+                    }
+                    
+                    logger.info(f"✅ Vidmoly HLS trouvé: {len(playlist.segments)} segments")
+                    return jsonify({
+                        'success': True,
+                        'player_type': 'hls',
+                        'video_key': video_key,
+                        'segments': len(playlist.segments)
+                    })
+                
+                # Si MP4, streaming direct
+                else:
+                    app.config[f'video_{video_key}'] = {
+                        'player_type': 'mp4',
+                        'url': video_url
+                    }
+                    logger.info(f"✅ Vidmoly MP4 fallback")
+                    return jsonify({
+                        'success': True,
+                        'player_type': 'mp4',
+                        'video_key': video_key,
+                        'direct_mp4': True
+                    })
+            
+            # ========== SIBNET ==========
+            elif player_type == 'sibnet':
+                video_type, video_url = extract_sibnet_video(video_id)
+                
+                if not video_url:
+                    logger.warning(f"⚠️ Sibnet non trouvé, fallback générique")
+                    embed_url = f"https://video.sibnet.ru/shell.php?videoid={video_id}"
+                    video_type, video_url = try_extract_all_methods(embed_url)
+                    if not video_url:
+                        return jsonify({'success': False, 'error': 'Vidéo non trouvée'}), 404
+                    logger.info(f"✅ Fallback trouvé: {video_type} - {video_url[:60]}...")
+                
+                # Si HLS
+                if video_type == 'hls' or 'm3u8' in str(video_type).lower():
+                    playlist_url, playlist = get_hls_segments(video_url)
+                    if not playlist or not playlist.segments:
+                        return jsonify({'success': False, 'error': 'Segments HLS non trouvés'}), 500
+                    
+                    app.config[f'video_{video_key}'] = {
+                        'player_type': 'hls',
+                        'url': playlist_url,
+                        'playlist': playlist
+                    }
+                    
+                    logger.info(f"✅ Sibnet HLS trouvé: {len(playlist.segments)} segments")
+                    return jsonify({
+                        'success': True,
+                        'player_type': 'hls',
+                        'video_key': video_key,
+                        'segments': len(playlist.segments)
+                    })
+                
+                # Si MP4
+                else:
+                    app.config[f'video_{video_key}'] = {
+                        'player_type': 'mp4',
+                        'url': video_url
+                    }
+                    logger.info(f"✅ Sibnet MP4")
+                    return jsonify({
+                        'success': True,
+                        'player_type': 'mp4',
+                        'video_key': video_key,
+                        'direct_mp4': True
+                    })
+            
+            # ========== LECTEUR GÉNÉRIQUE ==========
+            else:
+                logger.info(f"📍 Lecteur générique: {url}")
+                video_type, video_url = try_extract_all_methods(url)
+                
+                if not video_url:
+                    return jsonify({'success': False, 'error': 'Source non trouvée', 'use_iframe': True}), 404
+                
+                logger.info(f"✅ Générique trouvé: {video_type} - {video_url[:60]}...")
+                
+                # Si HLS
+                if video_type == 'hls' or 'm3u8' in str(video_type).lower():
+                    playlist_url, playlist = get_hls_segments(video_url)
+                    if not playlist or not playlist.segments:
+                        return jsonify({'success': False, 'error': 'Segments HLS non trouvés'}), 500
+                    
+                    app.config[f'video_{video_key}'] = {
+                        'player_type': 'hls',
+                        'url': playlist_url,
+                        'playlist': playlist
+                    }
+                    
+                    return jsonify({
+                        'success': True,
+                        'player_type': 'hls',
+                        'video_key': video_key,
+                        'segments': len(playlist.segments)
+                    })
+                
+                # Si MP4 ou WEBM
+                else:
+                    app.config[f'video_{video_key}'] = {
+                        'player_type': 'mp4',
+                        'url': video_url,
+                        'mime_type': 'video/mp4' if video_type == 'mp4' else 'video/webm'
+                    }
+                    return jsonify({
+                        'success': True,
+                        'player_type': 'mp4',
+                        'video_key': video_key,
+                        'direct_mp4': True
+                    })
+        
         except Exception as e:
-            logger.error(f"Erreur API info: {e}")
+            logger.error(f"❌ Erreur API info: {e}", exc_info=True)
             return jsonify({'success': False, 'error': str(e)}), 500
     
     
@@ -583,12 +801,14 @@ def register_frontend_routes(app):
         """Stream vidéo"""
         video_data = app.config.get(f'video_{video_key}')
         if not video_data:
+            logger.error(f"❌ Video key non trouvé: {video_key}")
             return "Non trouvé", 404
         
         player_type = video_data['player_type']
+        logger.info(f"🎬 Stream type: {player_type}")
         
-        # VIDMOLY (HLS)
-        if player_type == 'vidmoly':
+        # ========== HLS ==========
+        if player_type == 'hls':
             playlist = video_data['playlist']
             base_url = video_data['url'].rsplit('/', 1)[0] + '/'
             
@@ -603,35 +823,17 @@ def register_frontend_routes(app):
             
             manifest += "#EXT-X-ENDLIST\n"
             
+            logger.info(f"✅ HLS manifest retourné ({len(playlist.segments)} segments)")
             return Response(manifest, mimetype='application/vnd.apple.mpegurl')
         
-        # SENDVID (MP4 Direct)
+        # ========== SENDVID (Format ancien script) ==========
         elif player_type == 'sendvid':
             video_url = video_data['url']
-            range_header = request.headers.get('Range')
+            logger.info(f"📍 SendVid stream: {video_url[:60]}...")
             
-            if range_header and video_data.get('accepts_range'):
-                headers = video_session.headers.copy()
-                headers['Range'] = range_header
-                response = video_session.get(video_url, headers=headers, stream=True, timeout=30)
-                
-                def generate():
-                    for chunk in response.iter_content(chunk_size=8192):
-                        if chunk:
-                            yield chunk
-                
-                return Response(
-                    generate(),
-                    status=response.status_code,
-                    mimetype='video/mp4',
-                    headers={
-                        'Content-Range': response.headers.get('Content-Range', ''),
-                        'Content-Length': response.headers.get('Content-Length', ''),
-                        'Accept-Ranges': 'bytes'
-                    }
-                )
-            else:
-                response = video_session.get(video_url, stream=True, timeout=30)
+            try:
+                response = video_session.get(video_url, stream=True, timeout=30, allow_redirects=True)
+                logger.info(f"✅ SendVid response status: {response.status_code}")
                 
                 def generate():
                     for chunk in response.iter_content(chunk_size=8192):
@@ -641,21 +843,46 @@ def register_frontend_routes(app):
                 return Response(
                     generate(),
                     mimetype='video/mp4',
-                    headers={
-                        'Content-Length': str(video_data.get('total_size', 0)),
-                        'Accept-Ranges': 'bytes'
-                    }
+                    headers={'Accept-Ranges': 'bytes'}
                 )
+            except Exception as e:
+                logger.error(f"❌ Erreur SendVid stream: {e}")
+                return "Erreur streaming", 500
         
+        # ========== MP4 / WEBM (Direct) ==========
+        elif player_type == 'mp4':
+            video_url = video_data['url']
+            mime_type = video_data.get('mime_type', 'video/mp4')
+            logger.info(f"📍 MP4 stream: {video_url[:60]}...")
+            
+            try:
+                response = video_session.get(video_url, stream=True, timeout=30, allow_redirects=True)
+                logger.info(f"✅ MP4 response status: {response.status_code}")
+                
+                def generate():
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            yield chunk
+                
+                return Response(
+                    generate(),
+                    mimetype=mime_type,
+                    headers={'Accept-Ranges': 'bytes'}
+                )
+            except Exception as e:
+                logger.error(f"❌ Erreur MP4 stream: {e}")
+                return "Erreur streaming", 500
+        
+        logger.error(f"❌ Type non supporté: {player_type}")
         return "Type non supporté", 400
     
     
     @app.route('/api/video/segment/<video_key>/<int:segment_num>')
     @login_required
     def video_segment(video_key, segment_num):
-        """Proxy segment Vidmoly"""
+        """Proxy segment HLS"""
         video_data = app.config.get(f'video_{video_key}')
-        if not video_data or video_data['player_type'] != 'vidmoly':
+        if not video_data or video_data['player_type'] != 'hls':
             return "Non trouvé", 404
         
         segment_url = app.config.get(f'segment_{video_key}_{segment_num}')
@@ -672,7 +899,7 @@ def register_frontend_routes(app):
             
             return Response(generate(), mimetype='video/mp2t')
         except Exception as e:
-            logger.error(f"Erreur segment {segment_num}: {e}")
+            logger.error(f"❌ Erreur segment {segment_num}: {e}")
             return f"Erreur: {str(e)}", 500
     
     
@@ -735,7 +962,6 @@ def register_frontend_routes(app):
             return jsonify({'success': True, 'action': 'added'})
     
     
-    # 🔥 ROUTE MANQUANTE - AJOUTÉE ICI
     @app.route('/remove-from-watching', methods=['POST'])
     @login_required
     def remove_from_watching():
@@ -746,7 +972,6 @@ def register_frontend_routes(app):
             return jsonify({'success': False, 'error': 'ID manquant'}), 400
         
         try:
-            # Supprimer toutes les progressions de cet anime pour l'utilisateur
             deleted_count = UserProgress.query.filter_by(
                 user_id=current_user.id,
                 anime_id=anime_id
